@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import android.provider.MediaStore
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -42,6 +43,32 @@ private data class TextLayer(
 )
 
 private data class Snap(val layers: List<TextLayer>, val bg: Int, val ratioIdx: Int)
+
+private class Tpl(val name: String, val ratioIdx: Int, val bg: Int, val layers: List<TextLayer>)
+
+private val white = 0xFFFFFFFF.toInt()
+private val yellow = 0xFFF5C518.toInt()
+
+private val templates = listOf(
+    Tpl("Sale", 0, 0xFFE53935.toInt(), listOf(
+        TextLayer(0, "BIG SALE", 0.10f, 0.22f, 0.16f, white),
+        TextLayer(0, "UP TO 50% OFF", 0.10f, 0.48f, 0.08f, yellow),
+        TextLayer(0, "This weekend only", 0.10f, 0.62f, 0.05f, white, false)
+    )),
+    Tpl("Quote", 1, 0xFF1E1E2C.toInt(), listOf(
+        TextLayer(0, "Your quote here", 0.10f, 0.35f, 0.09f, white),
+        TextLayer(0, "- Author", 0.10f, 0.62f, 0.05f, yellow, false)
+    )),
+    Tpl("Birthday", 2, 0xFF8E44AD.toInt(), listOf(
+        TextLayer(0, "HAPPY", 0.15f, 0.22f, 0.18f, white),
+        TextLayer(0, "BIRTHDAY", 0.08f, 0.34f, 0.14f, yellow),
+        TextLayer(0, "\uD83C\uDF89", 0.35f, 0.55f, 0.25f, white)
+    )),
+    Tpl("Thumbnail", 3, 0xFF000000.toInt(), listOf(
+        TextLayer(0, "TITLE HERE", 0.06f, 0.30f, 0.12f, yellow),
+        TextLayer(0, "Subtitle", 0.06f, 0.55f, 0.06f, white, false)
+    ))
+)
 
 private val palette = listOf(
     0xFFFFFFFF.toInt(), 0xFF000000.toInt(), 0xFFFF5A36.toInt(), 0xFF2D6CDF.toInt(),
@@ -161,6 +188,28 @@ fun PosterEditorScreen(onBack: () -> Unit) {
                 }) { Text("Delete layer") }
             }
 
+            Text("Templates (replaces current layers)", style = MaterialTheme.typography.labelMedium)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                templates.forEach { t ->
+                    OutlinedButton(onClick = {
+                        layers.clear()
+                        layers.addAll(t.layers.map { it.copy(id = nextId++) })
+                        bg = t.bg
+                        ratioIdx = t.ratioIdx
+                        selected = 0
+                    }) { Text(t.name) }
+                }
+            }
+            Text("Stickers", style = MaterialTheme.typography.labelMedium)
+            Row(Modifier.horizontalScroll(rememberScrollState())) {
+                listOf("\uD83D\uDE00", "\uD83D\uDE0D", "\uD83D\uDD25", "\u2B50", "\u2764\uFE0F", "\uD83D\uDC4D",
+                    "\uD83C\uDF89", "\u2728", "\uD83D\uDE0E", "\uD83D\uDE80", "\uD83C\uDF08", "\uD83C\uDFB5").forEach { e ->
+                    TextButton(onClick = {
+                        layers.add(TextLayer(nextId++, e, 0.4f, 0.4f, 0.2f, 0xFFFFFFFF.toInt()))
+                        selected = layers.size - 1
+                    }) { Text(e, fontSize = 26.sp) }
+                }
+            }
             if (cur != null) {
                 Text("Layer ${selected + 1} of ${layers.size} (drag text on canvas to move)",
                     style = MaterialTheme.typography.labelMedium)

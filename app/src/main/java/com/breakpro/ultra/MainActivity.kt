@@ -46,8 +46,14 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         setContent {
             var dark by remember { mutableStateOf(prefs.getBoolean("dark_theme", true)) }
-            val accent = Color(0xFFFF5A36)
-            MaterialTheme(colorScheme = if (dark) darkColorScheme(primary = accent) else lightColorScheme(primary = accent)) {
+            val accent = Color(0xFF8B3DFF)
+            val darkScheme = darkColorScheme(
+                primary = accent,
+                background = Color(0xFF0B0B14),
+                surface = Color(0xFF0B0B14),
+                surfaceVariant = Color(0xFF1A1A2B)
+            )
+            MaterialTheme(colorScheme = if (dark) darkScheme else lightColorScheme(primary = accent)) {
                 Surface(Modifier.fillMaxSize()) {
                     Root(dao, dark) { dark = it; prefs.edit().putBoolean("dark_theme", it).apply() }
                 }
@@ -74,7 +80,32 @@ private fun Root(dao: ProjectDao, dark: Boolean, onDarkChange: (Boolean) -> Unit
         showAssets -> com.breakpro.ultra.assets.AssetLibraryScreen { showAssets = false }
         showSettings -> com.breakpro.ultra.settings.SettingsScreen(dao, dark, onDarkChange) { showSettings = false }
         showExports -> com.breakpro.ultra.exportlog.ExportManagerScreen { showExports = false }
-        else -> Scaffold(
+        else -> if (!showProjects) {
+            Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { pad ->
+                Box(Modifier.padding(pad)) {
+                    com.breakpro.ultra.home.HomeScreen(
+                        com.breakpro.ultra.home.HomeActions(
+                            newProject = { showAdd = true },
+                            newOfType = { type ->
+                                scope.launch {
+                                    val id = dao.insert(
+                                        ProjectEntity(name = "Untitled " + type.label.removeSuffix(" Project"), type = type.name)
+                                    )
+                                    openProject = dao.get(id)
+                                }
+                            },
+                            projects = { showProjects = true },
+                            assets = { showAssets = true },
+                            exports = { showExports = true },
+                            settings = { showSettings = true },
+                            soon = { name ->
+                                scope.launch { snackbar.showSnackbar("$name: not implemented yet") }
+                            }
+                        )
+                    )
+                }
+            }
+        } else Scaffold(
             topBar = { TopAppBar(title = { Text(if (showProjects) "My Projects" else "BREAK PRO ULTRA") }) },
             floatingActionButton = {
                 FloatingActionButton(onClick = { showAdd = true }) { Icon(Icons.Default.Add, "Add Project") }

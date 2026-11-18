@@ -1,6 +1,14 @@
 package com.breakpro.ultra.audio
 
+import android.Manifest
 import android.content.ContentValues
+import android.content.pm.PackageManager
+import android.media.MediaRecorder
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -63,9 +71,13 @@ fun AudioEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
     var progress by remember { mutableFloatStateOf(0f) }
     var status by remember { mutableStateOf("") }
     var transformer by remember { mutableStateOf<Transformer?>(null) }
+    val scope = rememberCoroutineScope()
+    var recording by remember { mutableStateOf(false) }
+    var recorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var recFile by remember { mutableStateOf<File?>(null) }
 
     val player = remember { ExoPlayer.Builder(ctx).build() }
-    DisposableEffect(Unit) { onDispose { player.release(); transformer?.cancel() } }
+    DisposableEffect(Unit) { onDispose { player.release(); transformer?.cancel(); try { recorder?.release() } catch (_: Throwable) { } } }
 
     LaunchedEffect(media) {
         media.filter { it.mimeType.startsWith("audio/") }.forEach { m ->
@@ -78,6 +90,45 @@ fun AudioEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
     }
     if (selected >= clips.size) selected = (clips.size - 1).coerceAtLeast(0)
     val cur = clips.getOrNull(selected)
+
+    fun startRecording() {
+        try {
+            val f = File(ctx.filesDir, "voiceover_${System.currentTimeMillis()}.m4a")
+            @Suppress("DEPRECATION")
+            val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(ctx) else MediaRecorder()
+            r.setAudioSource(MediaRecorder.AudioSource.MIC)
+            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            r.setAudioEncodingBitRate(128000)
+            r.setAudioSamplingRate(44100)
+            r.setOutputFile(f.absolutePath)
+            r.prepare()
+            r.start()
+            recorder = r; recFile = f; recording = true; status = "Recording..."
+        } catch (t: Throwable) {
+            status = "Recording failed: ${t.message}"
+        }
+    }
+
+    fun stopRecording() {
+        val r = recorder
+        val f = recFile
+        try { r?.stop() } catch (_: Throwable) { }
+        r?.release()
+        recorder = null; recording = false
+        if (f != null && f.exists() && f.length() > 0) {
+            scope.launch {
+                val u = Uri.fromFile(f)
+                val d = duration(ctx, u)
+                if (d > 0) { clips.add(AClip(nextId++, u, f.name, d)); status = "Voiceover added to tracks" }
+                else status = "Recording was empty"
+            }
+        }
+    }
+
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startRecording() else status = "Microphone permission denied"
+    }
 
     LaunchedEffect(cur?.id, cur?.startMs, cur?.endMs) {
         if (cur != null) { player.setMediaItem(clipItem(cur)); player.prepare() }
@@ -132,6 +183,11 @@ fun AudioEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
             Modifier.padding(pad).padding(12.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            Button(onClick = {
+                if (recording) stopRecording()
+                else if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
+                else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }) { Text(if (recording) "Stop recording" else "Record voiceover") }
             if (clips.isEmpty()) {
                 Text("No audio in this project. Go back, tap Import media and pick audio files.")
                 return@Column

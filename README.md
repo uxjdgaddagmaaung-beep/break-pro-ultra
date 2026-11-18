@@ -27,6 +27,11 @@ Poster: export PDF. Audio: copy track.
 Settings: dark/light theme.
 Poster: center text H/V (approximate). Vector: center shape on artboard.
 Video caption: colour + size (export only).
+Home: new purple dashboard (side menu, hero banner, quick actions, Popular Tools / More Features). Tiles that are not built show 'Soon'.
+Video: speed 0.5x-2x (export+preview), Export button in top bar. Audio: voiceover recording (mic permission). Poster: emoji stickers.
+Video editor: two-panel pro layout on wide/landscape screens; rotation no longer recreates the activity (state kept).
+Video: image/logo overlay (bottom-right, export). Poster: 4 ready templates (Sale, Quote, Birthday, Thumbnail).
+Video: Auto Cut = scene-change detection (keyframe sampling every 0.5 s) that splits the selected clip.
 minSdk 29.
 
 Not implemented yet: everything else (editors, export, effects, AI, marketplace).

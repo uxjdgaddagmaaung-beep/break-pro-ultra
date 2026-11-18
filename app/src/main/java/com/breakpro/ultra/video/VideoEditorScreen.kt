@@ -2,6 +2,10 @@ package com.breakpro.ultra.video
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.media3.effect.BitmapOverlay
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
@@ -25,6 +29,9 @@ import androidx.media3.effect.Brightness
 import androidx.media3.effect.Contrast
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.SpeedChangeEffect
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.effect.RgbFilter
 import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.TextOverlay
@@ -37,6 +44,8 @@ import androidx.media3.ui.PlayerView
 import com.breakpro.ultra.data.MediaItemEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -53,6 +62,8 @@ data class Clip(
     val rotation: Int = 0,        // 0/90/180/270
     val mute: Boolean = false,
     val caption: String = "",
+    val speed: Float = 1f,
+    val overlayUri: Uri? = null,
     val captionColor: Int = 0xFFFFFFFF.toInt(),
     val captionSize: Int = 48
 ) {
@@ -87,11 +98,13 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
         mutableIntStateOf(ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).getInt("default_height", 720))
     }
     var exporting by remember { mutableStateOf(false) }
+    var detecting by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var status by remember { mutableStateOf("") }
     var transformer by remember { mutableStateOf<Transformer?>(null) }
 
     val player = remember { ExoPlayer.Builder(ctx).build() }
+    val scope = rememberCoroutineScope()
     DisposableEffect(Unit) { onDispose { player.release(); transformer?.cancel() } }
 
     // Add imported video files to the timeline (once per uri).
@@ -108,7 +121,7 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
     val cur = clips.getOrNull(selected)
 
     // Preview the selected clip with its trim applied.
-    LaunchedEffect(cur?.id, cur?.startMs, cur?.endMs) {
+    LaunchedEffect(cur?.id, cur?.startMs, cur?.endMs, cur?.speed) {
         if (cur != null) {
             player.setMediaItem(
                 MediaItem.Builder().setUri(cur.uri).setClippingConfiguration(
@@ -117,6 +130,7 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                 ).build()
             )
             player.prepare()
+            player.setPlaybackSpeed(cur.speed)
         } else player.clearMediaItems()
     }
 
@@ -150,10 +164,18 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
             if (c.caption.isNotBlank()) fx.add(
                 OverlayEffect(ImmutableList.of(TextOverlay.createStaticTextOverlay(styledCaption(c))))
             )
+            if (c.overlayUri != null) {
+                overlayBitmapFor(ctx, c)?.let { bmp ->
+                    fx.add(OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(bmp))))
+                }
+            }
+            if (c.speed != 1f) fx.add(0, SpeedChangeEffect(c.speed))
             fx.add(Presentation.createForHeight(height))
+            val audioFx: List<AudioProcessor> =
+                if (c.speed != 1f) listOf(SonicAudioProcessor().apply { setSpeed(c.speed) }) else emptyList()
             EditedMediaItem.Builder(mi)
                 .setRemoveAudio(c.mute)
-                .setEffects(Effects(emptyList(), fx))
+                .setEffects(Effects(audioFx, fx))
                 .build()
         }
         val composition = Composition.Builder(listOf(EditedMediaItemSequence(items))).build()
@@ -186,22 +208,35 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
         t.start(composition, out.absolutePath)
     }
 
+    val overlayPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            if (selected in clips.indices) clips[selected] = clips[selected].copy(overlayUri = uri)
+        }
+    }
+
     Scaffold(topBar = {
         TopAppBar(title = { Text("Video Editor") },
-            navigationIcon = { TextButton(onClick = onBack) { Text("Back") } })
+            navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+            actions = {
+                Button(enabled = !exporting && clips.isNotEmpty(), onClick = { startExport() }) { Text("Export") }
+                Spacer(Modifier.width(8.dp))
+            })
     }) { pad ->
-        Column(
-            Modifier.padding(pad).padding(12.dp)
-                .verticalScroll(androidx.compose.foundation.rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (clips.isEmpty()) {
+        if (clips.isEmpty()) {
+            Box(Modifier.padding(pad).padding(12.dp)) {
                 Text("No video in this project. Go back, tap Import media and pick videos.")
-                return@Column
             }
+            return@Scaffold
+        }
+        // Wide screens (landscape / tablet): pro layout with two panels. Phones: one scrolling column.
+        val wide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 700
+        val timelineBlock: @Composable () -> Unit = {
             AndroidView(
                 factory = { PlayerView(it).apply { this.player = player } },
-                modifier = Modifier.fillMaxWidth().height(220.dp)
+                modifier = Modifier.fillMaxWidth().height(if (wide) 300.dp else 220.dp)
             )
 
             // Timeline: clips in order, widths proportional to trimmed length.
@@ -257,7 +292,32 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                     OutlinedButton(onClick = { clips.add(selected + 1, cur.copy(id = nextId++)) }) { Text("Copy") }
                     OutlinedButton(onClick = { clips.removeAt(selected) }) { Text("Delete") }
                 }
-
+            }
+        }
+        val effectsBlock: @Composable () -> Unit = {
+            if (cur != null) {
+                Button(enabled = !detecting, onClick = {
+                    val target = cur
+                    val idx = selected
+                    detecting = true
+                    status = "Detecting scene changes..."
+                    scope.launch {
+                        val cuts = detectScenes(ctx, target)
+                        detecting = false
+                        if (cuts.isEmpty()) {
+                            status = "No scene changes found in this clip"
+                        } else {
+                            val bounds = listOf(target.startMs) + cuts + listOf(target.endMs)
+                            val segs = (0 until bounds.size - 1).map { i ->
+                                target.copy(id = nextId++, startMs = bounds[i], endMs = bounds[i + 1])
+                            }
+                            if (idx in clips.indices && clips[idx].id == target.id) {
+                                clips.removeAt(idx); clips.addAll(idx, segs)
+                                status = "Auto Cut: split into ${segs.size} clips"
+                            }
+                        }
+                    }
+                }) { Text(if (detecting) "Detecting..." else "Auto Cut (split at scene changes)") }
                 Text("Clip effects (applied on export, not in preview)",
                     style = MaterialTheme.typography.labelMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -268,6 +328,13 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                     OutlinedButton(onClick = {
                         clips[selected] = cur.copy(rotation = (cur.rotation + 90) % 360)
                     }) { Text("Rotate ${cur.rotation}°") }
+                }
+                Text("Speed (preview + export)", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0.5f, 1f, 1.5f, 2f).forEach { sp ->
+                        FilterChip(selected = cur.speed == sp, label = { Text("${sp}x") },
+                            onClick = { clips[selected] = cur.copy(speed = sp) })
+                    }
                 }
                 var br by remember(cur.id) { mutableFloatStateOf(cur.brightness) }
                 Text("Brightness")
@@ -284,6 +351,15 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Text("Overlay image / logo (bottom-right, export only)", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(onClick = { overlayPicker.launch(arrayOf("image/*")) }) {
+                        Text(if (cur.overlayUri == null) "Add image" else "Change image")
+                    }
+                    if (cur.overlayUri != null) {
+                        OutlinedButton(onClick = { clips[selected] = cur.copy(overlayUri = null) }) { Text("Remove") }
+                    }
+                }
                 if (cur.caption.isNotBlank()) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf("White" to 0xFFFFFFFF.toInt(), "Yellow" to 0xFFF5C518.toInt(),
@@ -297,7 +373,8 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                         valueRange = 24f..120f)
                 }
             }
-
+        }
+        val exportBlock: @Composable () -> Unit = {
             Text("Export resolution", style = MaterialTheme.typography.labelMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(480, 720, 1080).forEach { h ->
@@ -312,6 +389,26 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
             }
             if (exporting) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
             if (status.isNotEmpty()) Text(status, style = MaterialTheme.typography.bodySmall)
+        }
+        if (wide) {
+            Row(
+                Modifier.padding(pad).fillMaxSize().padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Column(
+                    Modifier.weight(1.4f).fillMaxHeight().verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) { timelineBlock() }
+                Column(
+                    Modifier.weight(1f).fillMaxHeight().verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) { effectsBlock(); exportBlock() }
+            }
+        } else {
+            Column(
+                Modifier.padding(pad).padding(12.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) { timelineBlock(); effectsBlock(); exportBlock() }
         }
     }
 }
@@ -337,4 +434,83 @@ private fun styledCaption(c: Clip): SpannableString {
     sp.setSpan(android.text.style.AbsoluteSizeSpan(c.captionSize), 0, sp.length,
         android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     return sp
+}
+
+/**
+ * Builds a transparent overlay bitmap with the same aspect ratio as the (rotated) video frame and the
+ * chosen image drawn bottom-right at ~22% width, so the full-frame BitmapOverlay does not stretch it.
+ */
+private fun overlayBitmapFor(ctx: Context, c: Clip): android.graphics.Bitmap? {
+    try {
+        var vw = 1280
+        var vh = 720
+        val r = MediaMetadataRetriever()
+        try {
+            r.setDataSource(ctx, c.uri)
+            val w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1280
+            val h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 720
+            val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            val total = (rot + c.rotation) % 360
+            if (total == 90 || total == 270) { vw = h; vh = w } else { vw = w; vh = h }
+        } finally {
+            r.release()
+        }
+        val scale = 1280f / maxOf(vw, vh)
+        val cw = (vw * scale).toInt().coerceAtLeast(2)
+        val ch = (vh * scale).toInt().coerceAtLeast(2)
+        val uri = c.overlayUri ?: return null
+        val src = ctx.contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it) }
+            ?: return null
+        val out = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+        val tw = cw * 0.22f
+        val th = tw * src.height / src.width
+        val m = cw * 0.03f
+        android.graphics.Canvas(out).drawBitmap(
+            src, null, android.graphics.RectF(cw - m - tw, ch - m - th, cw - m, ch - m),
+            android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        )
+        src.recycle()
+        return out
+    } catch (_: Throwable) {
+        return null
+    }
+}
+
+/**
+ * Scene detection: samples a tiny frame every 500 ms (nearest keyframe, for speed) and reports the times where
+ * the average luminance difference to the previous sample is large. Cuts are at least 1.5 s apart.
+ */
+private suspend fun detectScenes(ctx: Context, c: Clip): List<Long> = withContext(Dispatchers.Default) {
+    val cuts = mutableListOf<Long>()
+    val r = MediaMetadataRetriever()
+    try {
+        r.setDataSource(ctx, c.uri)
+        var prev: IntArray? = null
+        var t = c.startMs
+        var lastCut = c.startMs
+        while (t < c.endMs) {
+            val bmp = r.getScaledFrameAtTime(t * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 32, 32)
+            if (bmp != null) {
+                val px = IntArray(32 * 32)
+                bmp.getPixels(px, 0, 32, 0, 0, 32, 32)
+                bmp.recycle()
+                val lum = IntArray(px.size) {
+                    val p = px[it]
+                    (((p shr 16) and 255) * 299 + ((p shr 8) and 255) * 587 + (p and 255) * 114) / 1000
+                }
+                val pv = prev
+                if (pv != null) {
+                    var d = 0L
+                    for (i in lum.indices) d += abs(lum[i] - pv[i])
+                    if (d / lum.size > 28 && t - lastCut >= 1500) { cuts.add(t); lastCut = t }
+                }
+                prev = lum
+            }
+            t += 500
+        }
+    } catch (_: Throwable) {
+    } finally {
+        r.release()
+    }
+    cuts
 }
