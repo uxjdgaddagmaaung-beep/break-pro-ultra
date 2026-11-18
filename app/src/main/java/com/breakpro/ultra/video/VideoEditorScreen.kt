@@ -32,6 +32,7 @@ import com.google.common.collect.ImmutableList
 import android.text.SpannableString
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.transformer.*
+import androidx.media3.transformer.Composition
 import androidx.media3.ui.PlayerView
 import com.breakpro.ultra.data.MediaItemEntity
 import kotlinx.coroutines.Dispatchers
@@ -208,7 +209,7 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                 style = MaterialTheme.typography.labelMedium)
             LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 itemsIndexed(clips, key = { _, c -> c.id }) { i, c ->
-                    val w = (c.lengthMs / 100).coerceIn(60, 400).dp
+                    val w = (c.lengthMs / 100).toInt().coerceIn(60, 400).dp
                     Card(
                         Modifier.width(w).height(56.dp).clickable { selected = i },
                         colors = CardDefaults.cardColors(
