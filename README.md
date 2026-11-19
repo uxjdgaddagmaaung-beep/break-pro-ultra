@@ -32,6 +32,7 @@ Video: speed 0.5x-2x (export+preview), Export button in top bar. Audio: voiceove
 Video editor: two-panel pro layout on wide/landscape screens; rotation no longer recreates the activity (state kept).
 Video: image/logo overlay (bottom-right, export). Poster: 4 ready templates (Sale, Quote, Birthday, Thumbnail).
 Video: Auto Cut = scene-change detection (keyframe sampling every 0.5 s) that splits the selected clip.
+Video editor: CapCut-style layout (top bar Undo/Redo/Export, Video 1 + Audio 1 timeline, bottom tool bar: Trim, Split, Speed, Color, Effects, Text, Overlay, Audio, Auto Cut, Copy, Delete, Quality). Saturation via HslAdjustment.
 minSdk 29.
 
 Not implemented yet: everything else (editors, export, effects, AI, marketplace).

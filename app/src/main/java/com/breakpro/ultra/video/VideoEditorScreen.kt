@@ -26,6 +26,31 @@ import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Brightness
+import androidx.media3.effect.HslAdjustment
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.VerticalSplit
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.media3.effect.Contrast
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
@@ -63,6 +88,7 @@ data class Clip(
     val mute: Boolean = false,
     val caption: String = "",
     val speed: Float = 1f,
+    val saturation: Float = 0f,   // -100..100
     val overlayUri: Uri? = null,
     val captionColor: Int = 0xFFFFFFFF.toInt(),
     val captionSize: Int = 48
@@ -161,6 +187,7 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
             if (c.grayscale) fx.add(RgbFilter.createGrayscaleFilter())
             if (c.brightness != 0f) fx.add(Brightness(c.brightness))
             if (c.contrast != 0f) fx.add(Contrast(c.contrast))
+            if (c.saturation != 0f) fx.add(HslAdjustment.Builder().adjustSaturation(c.saturation).build())
             if (c.caption.isNotBlank()) fx.add(
                 OverlayEffect(ImmutableList.of(TextOverlay.createStaticTextOverlay(styledCaption(c))))
             )
@@ -208,6 +235,29 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
         t.start(composition, out.absolutePath)
     }
 
+    // ---- Undo / redo: snapshots of the clip list, taken after edits settle (300 ms) ----
+    val undoStack = remember { mutableStateListOf<List<Clip>>() }
+    val redoStack = remember { mutableStateListOf<List<Clip>>() }
+    var lastSnap by remember { mutableStateOf<List<Clip>>(emptyList()) }
+    val snap = clips.toList()
+    LaunchedEffect(snap) {
+        delay(300)
+        if (snap != lastSnap) {
+            if (lastSnap.isNotEmpty()) {
+                undoStack.add(lastSnap)
+                if (undoStack.size > 50) undoStack.removeAt(0)
+                redoStack.clear()
+            }
+            lastSnap = snap
+        }
+    }
+    fun restore(s: List<Clip>) { clips.clear(); clips.addAll(s); lastSnap = s }
+
+    var tool by remember { mutableStateOf("Trim") }
+    val wide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 700
+    val accent = MaterialTheme.colorScheme.primary
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+
     val overlayPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             runCatching {
@@ -217,50 +267,94 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
         }
     }
 
-    Scaffold(topBar = {
-        TopAppBar(title = { Text("Video Editor") },
-            navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            actions = {
-                Button(enabled = !exporting && clips.isNotEmpty(), onClick = { startExport() }) { Text("Export") }
-                Spacer(Modifier.width(8.dp))
-            })
-    }) { pad ->
-        if (clips.isEmpty()) {
-            Box(Modifier.padding(pad).padding(12.dp)) {
-                Text("No video in this project. Go back, tap Import media and pick videos.")
-            }
-            return@Scaffold
+    fun doSplit() {
+        val c = cur ?: return
+        val at = c.startMs + player.currentPosition
+        if (at > c.startMs + 200 && at < c.endMs - 200) {
+            clips[selected] = c.copy(endMs = at)
+            clips.add(selected + 1, c.copy(id = nextId++, startMs = at))
+        } else {
+            status = "Move the playhead inside the clip (not at its edges) to split"
         }
-        // Wide screens (landscape / tablet): pro layout with two panels. Phones: one scrolling column.
-        val wide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 700
-        val timelineBlock: @Composable () -> Unit = {
-            AndroidView(
-                factory = { PlayerView(it).apply { this.player = player } },
-                modifier = Modifier.fillMaxWidth().height(if (wide) 300.dp else 220.dp)
-            )
+    }
 
-            // Timeline: clips in order, widths proportional to trimmed length.
-            Text("Timeline (${clips.size} clips, total ${fmt(clips.sumOf { it.lengthMs })})",
-                style = MaterialTheme.typography.labelMedium)
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                itemsIndexed(clips, key = { _, c -> c.id }) { i, c ->
-                    val w = (c.lengthMs / 100).toInt().coerceIn(60, 400).dp
-                    Card(
-                        Modifier.width(w).height(56.dp).clickable { selected = i },
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (i == selected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    ) {
-                        Column(Modifier.padding(6.dp)) {
-                            Text(c.name, maxLines = 1, style = MaterialTheme.typography.labelSmall)
-                            Text(fmt(c.lengthMs), style = MaterialTheme.typography.labelSmall)
+    val tools = listOf(
+        ToolBtn("Trim", Icons.Default.ContentCut, "Trim"),
+        ToolBtn("Split", Icons.Default.VerticalSplit, null) { doSplit() },
+        ToolBtn("Speed", Icons.Default.Speed, "Speed"),
+        ToolBtn("Color", Icons.Default.Palette, "Color"),
+        ToolBtn("Effects", Icons.Default.AutoAwesome, "Effects"),
+        ToolBtn("Text", Icons.Default.TextFields, "Text"),
+        ToolBtn("Overlay", Icons.Default.AddPhotoAlternate, "Overlay"),
+        ToolBtn("Audio", Icons.Default.VolumeUp, "Audio"),
+        ToolBtn("Auto Cut", Icons.Default.AutoFixHigh, "Auto Cut"),
+        ToolBtn("Copy", Icons.Default.ContentCopy, null) {
+            cur?.let { clips.add(selected + 1, it.copy(id = nextId++)) }
+        },
+        ToolBtn("Delete", Icons.Default.Delete, null) {
+            if (clips.isNotEmpty()) clips.removeAt(selected)
+        },
+        ToolBtn("Quality", Icons.Default.HighQuality, "Quality")
+    )
+
+    val previewBlock: @Composable () -> Unit = {
+        AndroidView(
+            factory = { PlayerView(it).apply { this.player = player } },
+            modifier = Modifier.fillMaxWidth().height(if (wide) 300.dp else 210.dp)
+        )
+        if (exporting) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+        if (status.isNotEmpty()) Text(status, style = MaterialTheme.typography.bodySmall)
+    }
+
+    val timelineBlock: @Composable () -> Unit = {
+        Text("Timeline: ${clips.size} clips, total ${fmt(clips.sumOf { it.lengthMs })}",
+            style = MaterialTheme.typography.labelMedium)
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.width(48.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Video 1", fontSize = 10.sp, modifier = Modifier.height(48.dp))
+                Text("Audio 1", fontSize = 10.sp, modifier = Modifier.height(28.dp))
+            }
+            Column(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    clips.forEachIndexed { i, c ->
+                        val w = (c.lengthMs / 100).toInt().coerceIn(60, 400).dp
+                        Card(
+                            Modifier.width(w).height(48.dp).clickable { selected = i },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (i == selected) accent else MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        ) {
+                            Column(Modifier.padding(4.dp)) {
+                                Text(c.name, maxLines = 1, fontSize = 10.sp)
+                                Text(fmt(c.lengthMs), fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    clips.forEach { c ->
+                        val w = (c.lengthMs / 100).toInt().coerceIn(60, 400).dp
+                        Box(
+                            Modifier.width(w).height(28.dp).clip(RoundedCornerShape(6.dp))
+                                .background(if (c.mute) Color.Gray.copy(alpha = 0.4f) else Color(0xFFD946A8).copy(alpha = 0.55f)),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Text(if (c.mute) "muted" else "audio", fontSize = 10.sp, modifier = Modifier.padding(start = 6.dp))
                         }
                     }
                 }
             }
+        }
+    }
 
-            if (cur != null) {
+    val panelBlock: @Composable () -> Unit = {
+        if (cur == null) {
+            Text("Tap a clip on the timeline.")
+        } else when (tool) {
+            "Trim" -> {
                 var range by remember(cur.id, cur.startMs, cur.endMs) {
                     mutableStateOf(cur.startMs.toFloat()..cur.endMs.toFloat())
                 }
@@ -270,32 +364,97 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                     onValueChange = { range = it },
                     valueRange = 0f..cur.durationMs.toFloat(),
                     onValueChangeFinished = {
-                        val s = range.start.toLong()
-                        val e = range.endInclusive.toLong()
-                        if (e - s >= 200) clips[selected] = cur.copy(startMs = s, endMs = e)
+                        val a = range.start.toLong()
+                        val b = range.endInclusive.toLong()
+                        if (b - a >= 200) clips[selected] = cur.copy(startMs = a, endMs = b)
                     }
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedButton(onClick = {
-                        val at = cur.startMs + player.currentPosition
-                        if (at > cur.startMs + 200 && at < cur.endMs - 200) {
-                            clips[selected] = cur.copy(endMs = at)
-                            clips.add(selected + 1, cur.copy(id = nextId++, startMs = at))
-                        }
-                    }) { Text("Split") }
                     OutlinedButton(enabled = selected > 0, onClick = {
                         val c = clips.removeAt(selected); clips.add(selected - 1, c); selected--
-                    }) { Text("◀") }
+                    }) { Text("Move left") }
                     OutlinedButton(enabled = selected < clips.size - 1, onClick = {
                         val c = clips.removeAt(selected); clips.add(selected + 1, c); selected++
-                    }) { Text("▶") }
-                    OutlinedButton(onClick = { clips.add(selected + 1, cur.copy(id = nextId++)) }) { Text("Copy") }
-                    OutlinedButton(onClick = { clips.removeAt(selected) }) { Text("Delete") }
+                    }) { Text("Move right") }
+                }
+                Text("Use Split in the bar below to cut at the playhead.", style = MaterialTheme.typography.bodySmall)
+            }
+            "Speed" -> {
+                Text("Speed (preview + export)", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0.5f, 1f, 1.5f, 2f).forEach { sp ->
+                        FilterChip(selected = cur.speed == sp, label = { Text("${sp}x") },
+                            onClick = { clips[selected] = cur.copy(speed = sp) })
+                    }
                 }
             }
-        }
-        val effectsBlock: @Composable () -> Unit = {
-            if (cur != null) {
+            "Color" -> {
+                Text("Color (applied on export)", style = MaterialTheme.typography.labelMedium)
+                var br by remember(cur.id) { mutableFloatStateOf(cur.brightness) }
+                Text("Brightness")
+                Slider(br, { br = it }, valueRange = -0.5f..0.5f,
+                    onValueChangeFinished = { clips[selected] = cur.copy(brightness = br) })
+                var ct by remember(cur.id) { mutableFloatStateOf(cur.contrast) }
+                Text("Contrast")
+                Slider(ct, { ct = it }, valueRange = -0.5f..0.5f,
+                    onValueChangeFinished = { clips[selected] = cur.copy(contrast = ct) })
+                var sat by remember(cur.id) { mutableFloatStateOf(cur.saturation) }
+                Text("Saturation")
+                Slider(sat, { sat = it }, valueRange = -100f..100f,
+                    onValueChangeFinished = { clips[selected] = cur.copy(saturation = sat) })
+                Text("Colour wheels (shadows / midtones / highlights) are not built yet.",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            "Effects" -> {
+                Text("Effects (applied on export)", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = cur.grayscale, label = { Text("B&W") },
+                        onClick = { clips[selected] = cur.copy(grayscale = !cur.grayscale) })
+                    OutlinedButton(onClick = {
+                        clips[selected] = cur.copy(rotation = (cur.rotation + 90) % 360)
+                    }) { Text("Rotate ${cur.rotation}°") }
+                }
+                Text("Blur, glow and transitions are not built yet.", style = MaterialTheme.typography.bodySmall)
+            }
+            "Text" -> {
+                OutlinedTextField(
+                    value = cur.caption,
+                    onValueChange = { clips[selected] = cur.copy(caption = it) },
+                    label = { Text("Caption text (whole clip, export only)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (cur.caption.isNotBlank()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("White" to 0xFFFFFFFF.toInt(), "Yellow" to 0xFFF5C518.toInt(),
+                            "Red" to 0xFFFF3B30.toInt(), "Black" to 0xFF000000.toInt()).forEach { (n, col) ->
+                            FilterChip(selected = cur.captionColor == col, label = { Text(n) },
+                                onClick = { clips[selected] = cur.copy(captionColor = col) })
+                        }
+                    }
+                    Text("Caption size: ${cur.captionSize}")
+                    Slider(cur.captionSize.toFloat(), { clips[selected] = cur.copy(captionSize = it.toInt()) },
+                        valueRange = 24f..120f)
+                }
+            }
+            "Overlay" -> {
+                Text("Overlay image / logo (bottom-right, export only)", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(onClick = { overlayPicker.launch(arrayOf("image/*")) }) {
+                        Text(if (cur.overlayUri == null) "Add image" else "Change image")
+                    }
+                    if (cur.overlayUri != null) {
+                        OutlinedButton(onClick = { clips[selected] = cur.copy(overlayUri = null) }) { Text("Remove") }
+                    }
+                }
+            }
+            "Audio" -> {
+                Text("Clip audio", style = MaterialTheme.typography.labelMedium)
+                FilterChip(selected = cur.mute, label = { Text(if (cur.mute) "Muted" else "Mute this clip") },
+                    onClick = { clips[selected] = cur.copy(mute = !cur.mute) })
+                Text("Voiceover recording is in an Audio project.", style = MaterialTheme.typography.bodySmall)
+            }
+            "Auto Cut" -> {
                 Button(enabled = !detecting, onClick = {
                     val target = cur
                     val idx = selected
@@ -317,78 +476,65 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                             }
                         }
                     }
-                }) { Text(if (detecting) "Detecting..." else "Auto Cut (split at scene changes)") }
-                Text("Clip effects (applied on export, not in preview)",
-                    style = MaterialTheme.typography.labelMedium)
+                }) { Text(if (detecting) "Detecting..." else "Split at scene changes") }
+            }
+            "Quality" -> {
+                Text("Export resolution", style = MaterialTheme.typography.labelMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterChip(selected = cur.grayscale, label = { Text("B&W") },
-                        onClick = { clips[selected] = cur.copy(grayscale = !cur.grayscale) })
-                    FilterChip(selected = cur.mute, label = { Text("Mute") },
-                        onClick = { clips[selected] = cur.copy(mute = !cur.mute) })
-                    OutlinedButton(onClick = {
-                        clips[selected] = cur.copy(rotation = (cur.rotation + 90) % 360)
-                    }) { Text("Rotate ${cur.rotation}°") }
-                }
-                Text("Speed (preview + export)", style = MaterialTheme.typography.labelMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0.5f, 1f, 1.5f, 2f).forEach { sp ->
-                        FilterChip(selected = cur.speed == sp, label = { Text("${sp}x") },
-                            onClick = { clips[selected] = cur.copy(speed = sp) })
+                    listOf(480, 720, 1080).forEach { h ->
+                        FilterChip(selected = height == h, onClick = { height = h }, label = { Text("${h}p") })
                     }
                 }
-                var br by remember(cur.id) { mutableFloatStateOf(cur.brightness) }
-                Text("Brightness")
-                Slider(br, { br = it }, valueRange = -0.5f..0.5f,
-                    onValueChangeFinished = { clips[selected] = cur.copy(brightness = br) })
-                var ct by remember(cur.id) { mutableFloatStateOf(cur.contrast) }
-                Text("Contrast")
-                Slider(ct, { ct = it }, valueRange = -0.5f..0.5f,
-                    onValueChangeFinished = { clips[selected] = cur.copy(contrast = ct) })
-                OutlinedTextField(
-                    value = cur.caption,
-                    onValueChange = { clips[selected] = cur.copy(caption = it) },
-                    label = { Text("Caption text (whole clip)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text("Overlay image / logo (bottom-right, export only)", style = MaterialTheme.typography.labelMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedButton(onClick = { overlayPicker.launch(arrayOf("image/*")) }) {
-                        Text(if (cur.overlayUri == null) "Add image" else "Change image")
-                    }
-                    if (cur.overlayUri != null) {
-                        OutlinedButton(onClick = { clips[selected] = cur.copy(overlayUri = null) }) { Text("Remove") }
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(enabled = !exporting, onClick = { startExport() }) { Text("Export MP4") }
+                    if (exporting) OutlinedButton(onClick = {
+                        transformer?.cancel(); exporting = false; status = "Export cancelled"
+                    }) { Text("Cancel") }
                 }
-                if (cur.caption.isNotBlank()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("White" to 0xFFFFFFFF.toInt(), "Yellow" to 0xFFF5C518.toInt(),
-                            "Red" to 0xFFFF3B30.toInt(), "Black" to 0xFF000000.toInt()).forEach { (n, col) ->
-                            FilterChip(selected = cur.captionColor == col, label = { Text(n) },
-                                onClick = { clips[selected] = cur.copy(captionColor = col) })
-                        }
+            }
+            else -> {}
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Break Pro", fontWeight = FontWeight.Bold) },
+                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                actions = {
+                    IconButton(enabled = undoStack.isNotEmpty(), onClick = {
+                        redoStack.add(lastSnap); restore(undoStack.removeAt(undoStack.lastIndex))
+                    }) { Icon(Icons.Default.Undo, "Undo") }
+                    IconButton(enabled = redoStack.isNotEmpty(), onClick = {
+                        undoStack.add(lastSnap); restore(redoStack.removeAt(redoStack.lastIndex))
+                    }) { Icon(Icons.Default.Redo, "Redo") }
+                    Button(enabled = !exporting && clips.isNotEmpty(), onClick = { startExport() }) { Text("Export") }
+                    Spacer(Modifier.width(8.dp))
+                }
+            )
+        },
+        bottomBar = {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
+                tools.forEach { t ->
+                    val active = t.panel != null && tool == t.panel
+                    Column(
+                        Modifier.width(66.dp)
+                            .clickable { if (t.panel != null) tool = t.panel else t.run?.invoke() }
+                            .padding(4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(t.icon, t.label, tint = if (active) accent else muted)
+                        Text(t.label, fontSize = 10.sp, color = if (active) accent else muted)
                     }
-                    Text("Caption size: ${cur.captionSize}")
-                    Slider(cur.captionSize.toFloat(), { clips[selected] = cur.copy(captionSize = it.toInt()) },
-                        valueRange = 24f..120f)
                 }
             }
         }
-        val exportBlock: @Composable () -> Unit = {
-            Text("Export resolution", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(480, 720, 1080).forEach { h ->
-                    FilterChip(selected = height == h, onClick = { height = h }, label = { Text("${h}p") })
-                }
+    ) { pad ->
+        if (clips.isEmpty()) {
+            Box(Modifier.padding(pad).padding(12.dp)) {
+                Text("No video in this project. Go back, tap Import media and pick videos.")
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(enabled = !exporting, onClick = { startExport() }) { Text("Export MP4") }
-                if (exporting) OutlinedButton(onClick = {
-                    transformer?.cancel(); exporting = false; status = "Export cancelled"
-                }) { Text("Cancel") }
-            }
-            if (exporting) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-            if (status.isNotEmpty()) Text(status, style = MaterialTheme.typography.bodySmall)
+            return@Scaffold
         }
         if (wide) {
             Row(
@@ -396,22 +542,30 @@ fun VideoEditorScreen(media: List<MediaItemEntity>, onBack: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Column(
-                    Modifier.weight(1.4f).fillMaxHeight().verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                    Modifier.weight(1.4f).fillMaxHeight().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) { timelineBlock() }
+                ) { previewBlock(); timelineBlock() }
                 Column(
-                    Modifier.weight(1f).fillMaxHeight().verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                    Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) { effectsBlock(); exportBlock() }
+                ) { panelBlock() }
             }
         } else {
             Column(
-                Modifier.padding(pad).padding(12.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                Modifier.padding(pad).padding(12.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) { timelineBlock(); effectsBlock(); exportBlock() }
+            ) { previewBlock(); timelineBlock(); panelBlock() }
         }
     }
 }
+
+/** One button in the bottom tool bar. panel != null opens that panel; otherwise [run] is an immediate action. */
+private class ToolBtn(
+    val label: String,
+    val icon: ImageVector,
+    val panel: String?,
+    val run: (() -> Unit)? = null
+)
 
 private fun saveToMovies(ctx: Context, file: File): Boolean = try {
     val values = ContentValues().apply {
